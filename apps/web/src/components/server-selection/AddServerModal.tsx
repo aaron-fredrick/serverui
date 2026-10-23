@@ -128,8 +128,12 @@ export function AddServerModal({
   // Cancel an in-flight test when the modal closes.
   useEffect(() => () => testAbort.current?.abort(), []);
 
+  // Mount only: a parent re-render hands in a new onClose and must not pull focus back here.
   useEffect(() => {
     firstField.current?.focus();
+  }, []);
+
+  useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") onClose();
     }

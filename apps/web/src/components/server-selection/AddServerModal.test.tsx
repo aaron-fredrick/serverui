@@ -32,6 +32,20 @@ describe("AddServerModal", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("keeps focus in the field being edited when the parent re-renders", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+
+    const { rerender } = render(<AddServerModal onClose={() => undefined} onSubmit={onSubmit} />);
+    await user.type(screen.getByLabelText("Server Name"), "Edge Lab");
+    await user.click(screen.getByLabelText("Host / IP"));
+
+    // A new onClose identity, as an inline arrow gives on every parent render.
+    rerender(<AddServerModal onClose={() => undefined} onSubmit={onSubmit} />);
+
+    expect(screen.getByLabelText("Host / IP")).toHaveFocus();
+  });
+
   it("submits a password-authenticated server", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
