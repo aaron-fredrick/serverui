@@ -226,7 +226,7 @@ func TestEncryptedPrivateKeyPassphraseIsNotRememberedByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	privateKey := string(pem.EncodeToMemory(block))
+	privateKey := strings.TrimSpace(string(pem.EncodeToMemory(block)))
 	created, err := svc.Create(ctx, Input{
 		Name: "One-time key", Host: "203.0.113.10", Port: 22, Username: "deploy",
 		AuthType: AuthPrivateKey, PrivateKey: privateKey, PrivateKeyPassphrase: "one-time phrase",
@@ -261,7 +261,7 @@ func TestRememberPrivateKeyPassphraseUpdatesEncryptedCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	privateKey := string(pem.EncodeToMemory(block))
+	privateKey := strings.TrimSpace(string(pem.EncodeToMemory(block)))
 	created, err := svc.Create(ctx, Input{
 		Name: "Remembered key", Host: "203.0.113.10", Port: 22, Username: "deploy",
 		AuthType: AuthPrivateKey, PrivateKey: privateKey, PrivateKeyPassphrase: "remember me",
@@ -300,7 +300,7 @@ func TestEncryptedPrivateKeyPassphrasePersistsForReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	privateKey := string(pem.EncodeToMemory(block))
+	privateKey := strings.TrimSpace(string(pem.EncodeToMemory(block)))
 	created, err := svc.Create(ctx, Input{
 		Name: "Encrypted key", Host: "203.0.113.10", Port: 22, Username: "deploy",
 		AuthType: AuthPrivateKey, PrivateKey: privateKey, PrivateKeyPassphrase: "correct horse", RememberPrivateKeyPassphrase: true,
