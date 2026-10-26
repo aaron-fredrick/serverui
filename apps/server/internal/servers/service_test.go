@@ -2,10 +2,15 @@ package servers
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 
 	"serverui/server/internal/crypto"
 	sshx "serverui/server/internal/ssh"
@@ -207,5 +212,122 @@ func TestCreateRejectsMissingPassword(t *testing.T) {
 	})
 	if err == nil || err.Error() != "password is required" {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestEncryptedPrivateKeyPassphraseIsNotRememberedByDefault(t *testing.T) {
+	svc := testService(t)
+	ctx := context.Background()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("one-time phrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := strings.TrimSpace(string(pem.EncodeToMemory(block)))
+	created, err := svc.Create(ctx, Input{
+		Name: "One-time key", Host: "203.0.113.10", Port: 22, Username: "deploy",
+		AuthType: AuthPrivateKey, PrivateKey: privateKey, PrivateKeyPassphrase: "one-time phrase",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := svc.store.GetCredential(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := svc.box.Decrypt(cred.EncryptedSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != privateKey {
+		t.Fatal("passphrase should not be included in the saved credential unless explicitly remembered")
+	}
+	if _, err := svc.savedAuth(ctx, Record{ID: created.ID, AuthType: AuthPrivateKey}); err != sshx.ErrPassphraseRequired {
+		t.Fatalf("saved auth error = %v, want passphrase required", err)
+	}
+}
+
+func TestRememberPrivateKeyPassphraseUpdatesEncryptedCredential(t *testing.T) {
+	svc := testService(t)
+	ctx := context.Background()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("remember me"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := strings.TrimSpace(string(pem.EncodeToMemory(block)))
+	created, err := svc.Create(ctx, Input{
+		Name: "Remembered key", Host: "203.0.113.10", Port: 22, Username: "deploy",
+		AuthType: AuthPrivateKey, PrivateKey: privateKey, PrivateKeyPassphrase: "remember me",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RememberPrivateKeyPassphrase(ctx, created.ID, "remember me"); err != nil {
+		t.Fatal(err)
+	}
+	cred, err := svc.store.GetCredential(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := svc.box.Decrypt(cred.EncryptedSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyValue, passphrase, err := decodePrivateKeyCredential(plain)
+	if err != nil || keyValue != privateKey || passphrase != "remember me" {
+		t.Fatal("remembered credential did not round-trip")
+	}
+	if _, err := svc.savedAuth(ctx, Record{ID: created.ID, AuthType: AuthPrivateKey}); err != nil {
+		t.Fatalf("saved auth after remembering passphrase: %v", err)
+	}
+}
+
+func TestEncryptedPrivateKeyPassphrasePersistsForReconnect(t *testing.T) {
+	svc := testService(t)
+	ctx := context.Background()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("correct horse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := strings.TrimSpace(string(pem.EncodeToMemory(block)))
+	created, err := svc.Create(ctx, Input{
+		Name: "Encrypted key", Host: "203.0.113.10", Port: 22, Username: "deploy",
+		AuthType: AuthPrivateKey, PrivateKey: privateKey, PrivateKeyPassphrase: "correct horse", RememberPrivateKeyPassphrase: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := svc.store.GetCredential(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(cred.EncryptedSecret, "correct horse") || strings.Contains(cred.EncryptedSecret, privateKey) {
+		t.Fatal("private key or passphrase leaked into stored ciphertext")
+	}
+	saved, err := svc.savedAuth(ctx, Record{ID: created.ID, AuthType: AuthPrivateKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := saved.(sshx.PublicKeyAuth); !ok {
+		t.Fatalf("saved auth = %#v, want PublicKeyAuth", saved)
+	}
+	plain, err := svc.box.Decrypt(cred.EncryptedSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyValue, passphrase, err := decodePrivateKeyCredential(plain)
+	if err != nil || keyValue != privateKey || passphrase != "correct horse" {
+		t.Fatal("stored credential did not round-trip")
 	}
 }

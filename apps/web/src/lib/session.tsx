@@ -10,6 +10,9 @@ import {
   type ReactNode,
 } from "react";
 import { ApiError } from "@/src/lib/api/client";
+import {
+  PrivateKeyPassphraseDialog,
+} from "@/src/components/server-selection/PrivateKeyPassphraseDialog";
 import { type NewServerInput, type Server, type ServerStatus } from "@/src/lib/servers";
 import { isSampleServer, mergeSampleServers } from "@/src/lib/sample-servers";
 import { useWindowServerId } from "@/src/lib/window-server";
@@ -36,7 +39,10 @@ type SessionContextValue = {
   serversError: string | null;
   refreshServers: () => Promise<Server[]>;
   selectServer: (server: Server) => boolean;
-  connectServer: (id: string) => Promise<Server | null>;
+  connectServer: (
+    id: string,
+    credentials?: { privateKeyPassphrase?: string; rememberPassphrase?: boolean },
+  ) => Promise<Server | null>;
   disconnectServer: (id: string) => Promise<void>;
   reconnectServer: (id: string) => Promise<Server | null>;
   addServer: (input: NewServerInput) => Promise<Server>;
@@ -112,6 +118,8 @@ function toWriteInput(input: NewServerInput) {
     authType: input.authType,
     password: input.password,
     privateKey: input.privateKey,
+    privateKeyPassphrase: input.privateKeyPassphrase,
+    rememberPrivateKeyPassphrase: input.rememberPrivateKeyPassphrase,
     iconId: input.iconId,
     ...(input.iconImage !== undefined ? { iconImage: input.iconImage } : {}),
   };
@@ -123,6 +131,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [selectedServer, setSelectedServer] = useState<Server | null>(null);
   const [loadingServers, setLoadingServers] = useState(true);
   const [serversError, setServersError] = useState<string | null>(null);
+  const [passphrasePrompt, setPassphrasePrompt] = useState<{
+    server: Server;
+    error?: string | null;
+    busy?: boolean;
+  } | null>(null);
 
   const refreshServers = useCallback(async () => {
     try {
@@ -245,14 +258,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const connectServer = useCallback(
-    async (id: string) => {
+    async (
+      id: string,
+      credentials?: { privateKeyPassphrase?: string; rememberPassphrase?: boolean },
+    ) => {
       if (isSampleServer(id)) {
         throw new Error("Sample servers are preview data and do not open an SSH session.");
       }
       patchServer(id, { status: "connecting", error: undefined });
       const started = Date.now();
       try {
-        const info = await connectServerApi(id);
+        const info = await connectServerApi(id, credentials);
         const next = {
           ...toSessionServer(info),
           connected: true,
@@ -264,11 +280,68 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setSelectedServer(next);
         return next;
       } catch (err) {
+        if (
+          err instanceof ApiError &&
+          (err.code === "passphrase_required" || err.code === "passphrase_invalid")
+        ) {
+          const server = servers.find((item) => item.id === id) ?? {
+            id,
+            name: "SSH server",
+            hostname: "",
+            address: "",
+            status: "offline" as const,
+            connected: false,
+          };
+          patchServer(id, { status: "offline", error: undefined });
+          setPassphrasePrompt({
+            server,
+            error: err.code === "passphrase_invalid" ? err.message : null,
+            busy: false,
+          });
+          return null;
+        }
         await refreshServers();
         throw err;
       }
     },
-    [patchServer, refreshServers],
+    [patchServer, refreshServers, servers],
+  );
+
+  const submitPassphrase = useCallback(
+    async (passphrase: string, rememberPassphrase: boolean) => {
+      const pending = passphrasePrompt;
+      if (!pending) return;
+      setPassphrasePrompt((current) =>
+        current ? { ...current, busy: true, error: null } : current,
+      );
+      try {
+        const info = await connectServerApi(pending.server.id, {
+          privateKeyPassphrase: passphrase,
+          rememberPassphrase,
+        });
+        const next = {
+          ...toSessionServer(info),
+          connected: true,
+        };
+        setServers((current) =>
+          current.map((item) =>
+            item.id === pending.server.id ? keepMetrics(item, next) : item,
+          ),
+        );
+        setSelectedServer(next);
+        setPassphrasePrompt(null);
+      } catch (err) {
+        const message = err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Unable to connect. Check the passphrase and try again.";
+        setPassphrasePrompt((current) =>
+          current ? { ...current, busy: false, error: message } : current,
+        );
+      }
+    },
+    [passphrasePrompt],
   );
 
   const disconnectServer = useCallback(async (id: string) => {
@@ -428,7 +501,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
+  return (
+    <SessionContext.Provider value={value}>
+      {children}
+      {passphrasePrompt ? (
+        <PrivateKeyPassphraseDialog
+          serverName={passphrasePrompt.server.name}
+          serverAddress={passphrasePrompt.server.address}
+          error={passphrasePrompt.error}
+          busy={passphrasePrompt.busy}
+          onCancel={() => setPassphrasePrompt(null)}
+          onSubmit={submitPassphrase}
+        />
+      ) : null}
+    </SessionContext.Provider>
+  );
 }
 
 export function useSession() {

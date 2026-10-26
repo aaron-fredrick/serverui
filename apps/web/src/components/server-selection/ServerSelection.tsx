@@ -8,7 +8,10 @@ import { ServerCard } from "@/src/components/server-selection/ServerCard";
 import type { NewServerInput, Server } from "@/src/lib/servers";
 
 export type ServerWindowActions = {
-  connect: (server: Server) => void;
+  connect: (
+    server: Server,
+    credentials?: { privateKeyPassphrase?: string; rememberPassphrase?: boolean },
+  ) => void;
   disconnect: (server: Server) => void;
   reconnect: (server: Server) => void;
   openFiles: (server: Server) => void;
@@ -65,8 +68,15 @@ export function ServerSelection({
       const created = await addServer(input);
       setAdding(false);
       if (options?.connect) {
-        if (actions) void actions.connect(created);
-        else void connectServer(created.id);
+        const credentials =
+          input.authType === "private_key" && input.privateKeyPassphrase
+            ? {
+                privateKeyPassphrase: input.privateKeyPassphrase,
+                rememberPassphrase: input.rememberPrivateKeyPassphrase ?? false,
+              }
+            : undefined;
+        if (actions) void actions.connect(created, credentials);
+        else void connectServer(created.id, credentials);
       }
     } catch (err) {
       setFormError(formatFriendly(friendlyError(err, "Unable to add server.")));

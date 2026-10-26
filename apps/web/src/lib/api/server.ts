@@ -190,10 +190,30 @@ export type ServerWriteInput = {
   authType: "password" | "private_key";
   password?: string;
   privateKey?: string;
+  privateKeyPassphrase?: string;
+  rememberPrivateKeyPassphrase?: boolean;
   iconId?: string;
   /** Data URL to store, or "" to remove a custom image. Omit to leave it unchanged. */
   iconImage?: string;
 };
+
+export type PrivateKeyValidationResult = {
+  ok: boolean;
+  code?: string;
+  error?: string;
+};
+
+/** Parses a private key without attempting an SSH connection. */
+export function validatePrivateKey(input: {
+  privateKey: string;
+  privateKeyPassphrase?: string;
+}) {
+  return apiRequest<PrivateKeyValidationResult>("/api/servers/validate-private-key", {
+    method: "POST",
+    body: JSON.stringify(input),
+    timeoutMs: 10000,
+  });
+}
 
 export type ConnectionTestResult = {
   ok: boolean;
@@ -260,7 +280,7 @@ export function testServerConnection(id: string) {
 }
 
 export type DraftTestResult = Omit<ConnectionTestResult, "server"> & {
-  /** Stable failure code from the backend, e.g. "auth_failed" or "timeout". */
+  /** Stable failure code from the backend, including passphrase_required and passphrase_invalid. */
   code?: string;
 };
 
@@ -278,9 +298,24 @@ export function testServerDraft(
   });
 }
 
-export function connectServer(id: string) {
+export function rememberServerPrivateKeyPassphrase(id: string, passphrase: string) {
+  return apiRequest<{ status: string }>(`/api/servers/${id}/private-key-passphrase`, {
+    method: "POST",
+    body: JSON.stringify({ passphrase }),
+    timeoutMs: 10000,
+  });
+}
+
+export function connectServer(
+  id: string,
+  credentials?: { privateKeyPassphrase?: string; rememberPassphrase?: boolean },
+) {
   return apiRequest<ServerInfo>(`/api/servers/${id}/connect`, {
     method: "POST",
+    body: JSON.stringify({
+      privateKeyPassphrase: credentials?.privateKeyPassphrase,
+      rememberPassphrase: credentials?.rememberPassphrase ?? false,
+    }),
     timeoutMs: 25000,
   });
 }

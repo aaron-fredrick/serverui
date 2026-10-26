@@ -37,13 +37,33 @@ func (s *Service) TestDraft(ctx context.Context, serverID string, input Input) (
 	var auth sshx.AuthMethod
 	var err error
 	if useSaved {
-		if auth, err = s.savedAuth(ctx, saved); err != nil {
+		if saved.AuthType == AuthPrivateKey && input.PrivateKeyPassphrase != "" {
+			cred, credErr := s.store.GetCredential(ctx, saved.ID)
+			if credErr != nil {
+				return DraftTestResult{Code: CodeSavedCredentialUnavailable, Error: "The saved credential could not be read. Enter the private key again."}, nil
+			}
+			secret, decryptErr := s.box.Decrypt(cred.EncryptedSecret)
+			if decryptErr != nil {
+				return DraftTestResult{Code: CodeSavedCredentialUnavailable, Error: "The saved credential could not be read. Enter the private key again."}, nil
+			}
+			key, _, decodeErr := decodePrivateKeyCredential(secret)
+			if decodeErr != nil {
+				return DraftTestResult{Code: CodeSavedCredentialUnavailable, Error: "The saved credential could not be read. Enter the private key again."}, nil
+			}
+			if auth, err = sshx.ParsePrivateKeyAuth(key, input.PrivateKeyPassphrase); err != nil {
+				return failedDraft(err, 0), nil
+			}
+		} else if auth, err = s.savedAuth(ctx, saved); err != nil {
+			code, message := sshx.ClassifyError(err)
+			if code == sshx.CodePassphraseRequired || code == sshx.CodePassphraseInvalid {
+				return DraftTestResult{Code: code, Error: message}, nil
+			}
 			return DraftTestResult{
 				Code:  CodeSavedCredentialUnavailable,
 				Error: "The saved credential could not be read. Enter the password or private key again.",
 			}, nil
 		}
-	} else if auth, err = authMethod(input.AuthType, input.secretValue()); err != nil {
+	} else if auth, err = authMethodWithPassphrase(input.AuthType, input.secretValue(), input.PrivateKeyPassphrase); err != nil {
 		return failedDraft(err, 0), nil
 	}
 

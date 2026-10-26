@@ -3,28 +3,30 @@ import { getInjectedDesktopConfig, localAuthHeaderName } from "@/src/lib/runtime
 
 export class ApiError extends Error {
   status: number;
+  code?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
-async function readError(response: Response) {
+async function readError(response: Response): Promise<{ message: string; code?: string }> {
   try {
-    const body = (await response.json()) as { error?: string };
-    if (body.error) return body.error;
+    const body = (await response.json()) as { error?: string; code?: string };
+    if (body.error) return { message: body.error, code: body.code };
   } catch {
     // Ignore non-JSON error bodies.
   }
-  if (response.status === 401) return "unauthorized";
+  if (response.status === 401) return { message: "unauthorized" };
   if (response.status === 502 || response.status === 503) {
-    return "unable to connect to server";
+    return { message: "unable to connect to server" };
   }
-  if (response.status === 403) return "permission denied";
-  if (response.status === 404) return "file not found";
-  return "request failed";
+  if (response.status === 403) return { message: "permission denied" };
+  if (response.status === 404) return { message: "file not found" };
+  return { message: "request failed" };
 }
 
 const REQUEST_TIMEOUT_MS = 5000;
@@ -80,7 +82,8 @@ export async function apiRequest<T>(path: string, init?: RequestOptions): Promis
   }
 
   if (!response.ok) {
-    throw new ApiError(await readError(response), response.status);
+    const error = await readError(response);
+    throw new ApiError(error.message, response.status, error.code);
   }
 
   if (response.status === 204) {
@@ -103,7 +106,8 @@ export async function apiBlob(path: string): Promise<Blob> {
     headers,
   });
   if (!response.ok) {
-    throw new ApiError(await readError(response), response.status);
+    const error = await readError(response);
+    throw new ApiError(error.message, response.status, error.code);
   }
   return response.blob();
 }

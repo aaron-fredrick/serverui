@@ -2,8 +2,13 @@ package servers
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/pem"
 	"errors"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 
 	sshx "serverui/server/internal/ssh"
 )
@@ -170,5 +175,72 @@ func TestTestDraftUnknownServer(t *testing.T) {
 	})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTestDraftPromptsForPassphraseOnSavedEncryptedKey(t *testing.T) {
+	svc := testService(t)
+	ctx := context.Background()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("saved phrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := string(pem.EncodeToMemory(block))
+	created, err := svc.Create(ctx, Input{
+		Name: "Saved encrypted key", Host: "203.0.113.10", Port: 22, Username: "deploy",
+		AuthType: AuthPrivateKey, PrivateKey: privateKey, PrivateKeyPassphrase: "saved phrase",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := Input{
+		Host: created.Host, Port: created.Port, Username: created.Username, AuthType: AuthPrivateKey,
+	}
+	result, err := svc.TestDraft(ctx, created.ID, input)
+	if err != nil || result.Code != sshx.CodePassphraseRequired {
+		t.Fatalf("missing passphrase result=%+v err=%v", result, err)
+	}
+	input.PrivateKeyPassphrase = "saved phrase"
+	result, err = svc.TestDraft(ctx, created.ID, input)
+	if err != nil || !result.OK {
+		t.Fatalf("correct passphrase result=%+v err=%v", result, err)
+	}
+}
+
+func TestTestDraftDetectsAndAcceptsPrivateKeyPassphrase(t *testing.T) {
+	svc := testService(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("correct horse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := string(pem.EncodeToMemory(block))
+	input := Input{
+		Host: "203.0.113.10", Port: 22, Username: "deploy", AuthType: AuthPrivateKey,
+		PrivateKey: privateKey,
+	}
+
+	result, err := svc.TestDraft(context.Background(), "", input)
+	if err != nil || result.Code != sshx.CodePassphraseRequired {
+		t.Fatalf("missing passphrase result=%+v err=%v", result, err)
+	}
+
+	input.PrivateKeyPassphrase = "wrong"
+	result, err = svc.TestDraft(context.Background(), "", input)
+	if err != nil || result.Code != sshx.CodePassphraseInvalid {
+		t.Fatalf("wrong passphrase result=%+v err=%v", result, err)
+	}
+
+	input.PrivateKeyPassphrase = "correct horse"
+	result, err = svc.TestDraft(context.Background(), "", input)
+	if err != nil || !result.OK {
+		t.Fatalf("correct passphrase result=%+v err=%v", result, err)
 	}
 }

@@ -6,7 +6,14 @@ import { ServerIcon } from "@/src/components/servers/ServerIcon";
 import { ServerIconPicker } from "@/src/components/servers/ServerIconPicker";
 import { readServerLogo } from "@/src/lib/server-logo";
 import { DEFAULT_SERVER_ICON, type ServerIconId } from "@/src/lib/server-icons";
-import { testServerDraft } from "@/src/lib/api/server";
+import {
+  rememberServerPrivateKeyPassphrase,
+  testServerDraft,
+  validatePrivateKey,
+} from "@/src/lib/api/server";
+import {
+  PrivateKeyPassphraseDialog,
+} from "@/src/components/server-selection/PrivateKeyPassphraseDialog";
 import { formatConnectionTestMessage } from "@/src/lib/errors";
 import type { NewServerInput, Server } from "@/src/lib/servers";
 import {
@@ -90,6 +97,13 @@ export function AddServerModal({
   const [auth, setAuth] = useState<AuthMethod>(server?.authType || "password");
   const [password, setPassword] = useState("");
   const [privateKey, setPrivateKey] = useState("");
+  const [privateKeyPassphrase, setPrivateKeyPassphrase] = useState("");
+  const [passphrasePromptAction, setPassphrasePromptAction] = useState<
+    "save" | "test" | null
+  >(null);
+  const [passphraseError, setPassphraseError] = useState<string | null>(null);
+  const [rememberPassphrase, setRememberPassphrase] = useState(false);
+  const [passphraseConnectAfterSave, setPassphraseConnectAfterSave] = useState(false);
   const [iconId, setIconId] = useState(server?.iconId || DEFAULT_SERVER_ICON);
   /** null keeps a saved custom image. "" removes it. A data URL is a new upload. */
   const [iconImage, setIconImage] = useState<string | null>(null);
@@ -120,6 +134,7 @@ export function AddServerModal({
     auth,
     password,
     privateKey,
+    privateKeyPassphrase,
   ]);
   const visibleTest = test?.key === fieldsKey ? test : null;
   const testUi = TEST_UI[visibleTest?.status ?? "idle"];
@@ -190,11 +205,22 @@ export function AddServerModal({
           authType: auth,
           password: auth === "password" ? password.trim() || undefined : undefined,
           privateKey: auth === "private_key" ? privateKey.trim() || undefined : undefined,
+          privateKeyPassphrase:
+            auth === "private_key" ? privateKeyPassphrase || undefined : undefined,
         },
         server?.id,
         { signal: controller.signal },
       );
       // The backend's failure text is already user-facing, so show it as-is.
+      if (result.code === "passphrase_required" || result.code === "passphrase_invalid") {
+        setPassphrasePromptAction("test");
+        setPassphraseConnectAfterSave(false);
+        setPassphraseError(
+          result.code === "passphrase_invalid"
+            ? result.error || "The passphrase is incorrect."
+            : null,
+        );
+      }
       setTest(
         result.ok
           ? { key, status: "ok", message: formatConnectionTestMessage(true, result.latencyMs) }
@@ -243,22 +269,125 @@ export function AddServerModal({
 
   const customActive = iconImage ? true : iconImage === null && Boolean(server?.customIcon);
 
+  function makeInput(passphrase?: string, remember = false): NewServerInput {
+    return {
+      name: name.trim(),
+      address: address.trim(),
+      hostname: address.trim(),
+      sshPort: Number(port),
+      username: username.trim(),
+      authType: auth,
+      password: auth === "password" ? password.trim() || undefined : undefined,
+      privateKey: auth === "private_key" ? privateKey.trim() || undefined : undefined,
+      privateKeyPassphrase: auth === "private_key" ? passphrase : undefined,
+      rememberPrivateKeyPassphrase: auth === "private_key" && remember,
+      iconId,
+      ...(iconImage !== null ? { iconImage } : {}),
+    };
+  }
+
+  async function handlePassphraseSubmit(passphrase: string, remember: boolean) {
+    setPassphraseError(null);
+    try {
+      if (privateKey.trim()) {
+        const keyCheck = await validatePrivateKey({
+          privateKey: privateKey.trim(),
+          privateKeyPassphrase: passphrase,
+        });
+        if (!keyCheck.ok) {
+          setPassphraseError(keyCheck.error || "Unable to unlock this private key.");
+          return;
+        }
+      } else if (
+        !(passphrasePromptAction === "test" && server?.id && auth === "private_key")
+      ) {
+        setPassphraseError("Paste the private key before entering its passphrase.");
+        return;
+      }
+      setPrivateKeyPassphrase(passphrase);
+      setRememberPassphrase(remember);
+
+      if (passphrasePromptAction === "test") {
+        const result = await testServerDraft({
+          host: address.trim(),
+          port: Number(port),
+          username: username.trim(),
+          authType: auth,
+          password: auth === "password" ? password.trim() || undefined : undefined,
+          privateKey: privateKey.trim(),
+          privateKeyPassphrase: passphrase,
+        }, server?.id);
+        const key = JSON.stringify([
+          address.trim(), port, username.trim(), auth, password, privateKey, passphrase,
+        ]);
+        setTest(
+          result.ok
+            ? {
+                key,
+                status: "ok",
+                message: formatConnectionTestMessage(true, result.latencyMs),
+              }
+            : { key, status: "fail", message: result.error || "Connection failed." },
+        );
+        if (result.code === "passphrase_required" || result.code === "passphrase_invalid") {
+          setPassphraseError(result.error || "The passphrase could not unlock this key.");
+          return;
+        }
+        if (remember && server?.id && auth === "private_key" && !privateKey.trim()) {
+          await rememberServerPrivateKeyPassphrase(server.id, passphrase);
+        }
+        setPassphrasePromptAction(null);
+        return;
+      }
+
+      await onSubmit(makeInput(passphrase, remember), { connect: passphraseConnectAfterSave });
+      setPassphrasePromptAction(null);
+    } catch (err) {
+      setPassphraseError(formatApiError(err, "Unable to validate this private key."));
+    }
+  }
+
   async function submit(event: FormEvent, connect?: boolean) {
     event.preventDefault();
     if (iconError || !check("save")) return;
+    if (auth === "private_key" && privateKey.trim()) {
+      try {
+        const keyCheck = await validatePrivateKey({
+          privateKey: privateKey.trim(),
+          privateKeyPassphrase: privateKeyPassphrase || undefined,
+        });
+        if (
+          keyCheck.code === "passphrase_required" ||
+          keyCheck.code === "passphrase_invalid"
+        ) {
+          setPassphrasePromptAction("save");
+          setPassphraseConnectAfterSave(Boolean(connect));
+          setPassphraseError(
+            keyCheck.code === "passphrase_invalid"
+              ? keyCheck.error || "The passphrase is incorrect."
+              : null,
+          );
+          return;
+        }
+        if (!keyCheck.ok) {
+          setTest({
+            key: fieldsKey,
+            status: "fail",
+            message: keyCheck.error || "The private key could not be read.",
+          });
+          return;
+        }
+      } catch (err) {
+        setTest({
+          key: fieldsKey,
+          status: "fail",
+          message: formatApiError(err, "Unable to validate the private key."),
+        });
+        return;
+      }
+    }
     await onSubmit(
-      {
-        name: name.trim(),
-        address: address.trim(),
-        hostname: address.trim(),
-        sshPort: Number(port),
-        username: username.trim(),
-        authType: auth,
-        password: password.trim() || undefined,
-        privateKey: privateKey.trim() || undefined,
-        iconId,
-        ...(iconImage !== null ? { iconImage } : {}),
-      },
+      makeInput(privateKeyPassphrase || undefined, rememberPassphrase),
       { connect },
     );
   }
@@ -397,12 +526,23 @@ export function AddServerModal({
             >
               <AuthChoice
                 selected={auth === "password"}
-                onSelect={() => setAuth("password")}
+                onSelect={() => {
+                  setAuth("password");
+                  setPrivateKeyPassphrase("");
+                  setPassphrasePromptAction(null);
+                  setPassphraseError(null);
+                  setRememberPassphrase(false);
+                  setPassphraseConnectAfterSave(false);
+                }}
                 label="Password"
               />
               <AuthChoice
                 selected={auth === "private_key"}
-                onSelect={() => setAuth("private_key")}
+                onSelect={() => {
+                  setAuth("private_key");
+                  setPassphrasePromptAction(null);
+                  setPassphraseError(null);
+                }}
                 label="SSH Private Key"
               />
             </div>
@@ -431,12 +571,19 @@ export function AddServerModal({
               label="Private Key"
               error={visibleErrors.secret}
               errorId={ids("secret").error}
-              hint="Your private key is encrypted before being stored. Passphrase-protected keys are not supported yet."
+              hint="Private keys are encrypted before storage. A passphrase is requested only when the pasted key requires one."
             >
               <textarea
                 {...fieldProps("secret")}
                 value={privateKey}
-                onChange={(event) => setPrivateKey(event.target.value)}
+                onChange={(event) => {
+                  setPrivateKey(event.target.value);
+                  setPrivateKeyPassphrase("");
+                  setPassphrasePromptAction(null);
+                  setPassphraseError(null);
+                  setRememberPassphrase(false);
+                  setPassphraseConnectAfterSave(false);
+                }}
                 className="sui-server-input min-h-[96px] resize-y font-mono text-[12px] leading-5"
                 placeholder={
                   editing
@@ -448,6 +595,7 @@ export function AddServerModal({
               />
             </Field>
           )}
+
         </div>
       </div>
 
@@ -535,15 +683,11 @@ export function AddServerModal({
     </form>
   );
 
-  if (pane) {
-    return (
-      <div className="animate-pane-in mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col">
-        {form}
-      </div>
-    );
-  }
-
-  return (
+  const mainContent = pane ? (
+    <div className="animate-pane-in mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col">
+      {form}
+    </div>
+  ) : (
     <div
       className={`animate-overlay-in inset-0 flex items-start justify-center bg-black/40 p-4 backdrop-blur-[2px] ${
         contained ? "absolute z-[30] pt-6" : "fixed z-[80] pt-[12vh]"
@@ -574,6 +718,31 @@ export function AddServerModal({
         {form}
       </div>
     </div>
+  );
+
+  return (
+    <>
+      {mainContent}
+      {passphrasePromptAction ? (
+        <PrivateKeyPassphraseDialog
+          serverName={name.trim() || "New server"}
+          serverAddress={address.trim()}
+          title="Unlock private key"
+          description={
+            passphrasePromptAction === "test"
+              ? "This key is encrypted. Unlock it to retry the connection test."
+              : "This key is encrypted. Enter its passphrase to finish saving the server."
+          }
+          error={passphraseError}
+          busy={busy}
+          onCancel={() => {
+            setPassphrasePromptAction(null);
+            setPassphraseError(null);
+          }}
+          onSubmit={handlePassphraseSubmit}
+        />
+      ) : null}
+    </>
   );
 }
 

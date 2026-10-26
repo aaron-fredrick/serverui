@@ -39,16 +39,18 @@ type Credential struct {
 }
 
 type Input struct {
-	Name       string
-	Host       string
-	Port       int
-	Username   string
-	AuthType   string
-	Password   string
-	PrivateKey string
-	IconID     string
+	Name                         string
+	Host                         string
+	Port                         int
+	Username                     string
+	AuthType                     string
+	Password                     string
+	PrivateKey                   string
+	PrivateKeyPassphrase         string
+	RememberPrivateKeyPassphrase bool
+	IconID                       string
 	// IconImage is a data URL to store as a file, empty to remove one, or nil to leave it.
-	IconImage *string
+	IconImage                    *string
 }
 
 type Public struct {

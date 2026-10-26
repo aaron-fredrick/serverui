@@ -47,6 +47,8 @@ export type NewServerInput = {
   authType: "password" | "private_key";
   password?: string;
   privateKey?: string;
+  privateKeyPassphrase?: string;
+  rememberPrivateKeyPassphrase?: boolean;
   iconId?: string;
   /** Data URL to store, or "" to remove a custom image. Omit to leave it unchanged. */
   iconImage?: string;

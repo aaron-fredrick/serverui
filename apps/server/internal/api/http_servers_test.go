@@ -2,11 +2,16 @@ package api
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 
 	"serverui/server/internal/archive"
 	"serverui/server/internal/crypto"
@@ -224,5 +229,60 @@ func TestTestConnectionDraftRejectsInvalidHost(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestValidatePrivateKeyEndpointDetectsPassphraseWithoutDialing(t *testing.T) {
+	handler := testAPI(t)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("correct horse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := string(pem.EncodeToMemory(block))
+
+	request := func(passphrase string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]string{
+			"privateKey": privateKey,
+			"privateKeyPassphrase": passphrase,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/servers/validate-private-key", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	missing := request("")
+	var missingResult map[string]any
+	if err := json.Unmarshal(missing.Body.Bytes(), &missingResult); err != nil {
+		t.Fatal(err)
+	}
+	if missing.Code != http.StatusOK || missingResult["code"] != sshx.CodePassphraseRequired || missingResult["ok"] != false {
+		t.Fatalf("missing passphrase response: status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	wrong := request("wrong")
+	var wrongResult map[string]any
+	if err := json.Unmarshal(wrong.Body.Bytes(), &wrongResult); err != nil {
+		t.Fatal(err)
+	}
+	if wrongResult["code"] != sshx.CodePassphraseInvalid {
+		t.Fatalf("wrong passphrase response: %s", wrong.Body.String())
+	}
+
+	correct := request("correct horse")
+	var correctResult map[string]any
+	if err := json.Unmarshal(correct.Body.Bytes(), &correctResult); err != nil {
+		t.Fatal(err)
+	}
+	if correct.Code != http.StatusOK || correctResult["ok"] != true {
+		t.Fatalf("correct passphrase response: status=%d body=%s", correct.Code, correct.Body.String())
 	}
 }
