@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/pem"
-	"strings"
+	"errors"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -32,19 +32,29 @@ func TestParsePrivateKeyAuthRejectsEmpty(t *testing.T) {
 	}
 }
 
-func TestParsePrivateKeyAuthRejectsPassphraseProtected(t *testing.T) {
+func TestParsePrivateKeyAuthPassphraseProtected(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("phrase"))
+	block, err := ssh.MarshalPrivateKeyWithPassphrase(key, "", []byte("correct horse"))
 	if err != nil {
-		t.Skip("passphrase marshal not available")
+		t.Fatal(err)
 	}
 	pemBytes := pem.EncodeToMemory(block)
-	_, err = ParsePrivateKeyAuth(string(pemBytes), "")
-	if err == nil || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("got %v", err)
+
+	if _, err := ParsePrivateKeyAuth(string(pemBytes), ""); !errors.Is(err, ErrPassphraseRequired) {
+		t.Fatalf("missing passphrase error = %v", err)
+	}
+	if _, err := ParsePrivateKeyAuth(string(pemBytes), "wrong"); !errors.Is(err, ErrInvalidPassphrase) {
+		t.Fatalf("wrong passphrase error = %v", err)
+	}
+	auth, err := ParsePrivateKeyAuth(string(pemBytes), "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := auth.(PublicKeyAuth); !ok {
+		t.Fatalf("auth = %#v, want PublicKeyAuth", auth)
 	}
 }
 

@@ -40,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/servers/{id}", s.updateServer)
 	mux.HandleFunc("DELETE /api/servers/{id}", s.deleteServer)
 	mux.HandleFunc("POST /api/servers/test-connection", s.testServerDraft)
+	mux.HandleFunc("POST /api/servers/validate-private-key", s.validatePrivateKey)
+	mux.HandleFunc("POST /api/servers/{id}/private-key-passphrase", s.rememberPrivateKeyPassphrase)
 	mux.HandleFunc("POST /api/servers/{id}/test-connection", s.testServer)
 	mux.HandleFunc("POST /api/servers/{id}/connect", s.connectServer)
 	mux.HandleFunc("POST /api/servers/{id}/disconnect", s.disconnectServer)
@@ -109,28 +111,32 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 type serverBody struct {
-	Name       string  `json:"name"`
-	Host       string  `json:"host"`
-	Port       int     `json:"port"`
-	Username   string  `json:"username"`
-	AuthType   string  `json:"authType"`
-	Password   string  `json:"password"`
-	PrivateKey string  `json:"privateKey"`
-	IconID     string  `json:"iconId"`
-	IconImage  *string `json:"iconImage"`
+	Name                         string  `json:"name"`
+	Host                         string  `json:"host"`
+	Port                         int     `json:"port"`
+	Username                     string  `json:"username"`
+	AuthType                     string  `json:"authType"`
+	Password                     string  `json:"password"`
+	PrivateKey                   string  `json:"privateKey"`
+	PrivateKeyPassphrase         string  `json:"privateKeyPassphrase"`
+	RememberPrivateKeyPassphrase bool    `json:"rememberPrivateKeyPassphrase"`
+	IconID                       string  `json:"iconId"`
+	IconImage                    *string `json:"iconImage"`
 }
 
 func (b serverBody) input() servers.Input {
 	return servers.Input{
-		Name:       b.Name,
-		Host:       b.Host,
-		Port:       b.Port,
-		Username:   b.Username,
-		AuthType:   b.AuthType,
-		Password:   b.Password,
-		PrivateKey: b.PrivateKey,
-		IconID:     b.IconID,
-		IconImage:  b.IconImage,
+		Name:                         b.Name,
+		Host:                         b.Host,
+		Port:                         b.Port,
+		Username:                     b.Username,
+		AuthType:                     b.AuthType,
+		Password:                     b.Password,
+		PrivateKey:                   b.PrivateKey,
+		PrivateKeyPassphrase:         b.PrivateKeyPassphrase,
+		RememberPrivateKeyPassphrase: b.RememberPrivateKeyPassphrase,
+		IconID:                       b.IconID,
+		IconImage:                    b.IconImage,
 	}
 }
 
@@ -218,6 +224,39 @@ func (s *Server) testServer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// validatePrivateKey parses a key without opening a network connection.
+func (s *Server) validatePrivateKey(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PrivateKey           string `json:"privateKey"`
+		PrivateKeyPassphrase string `json:"privateKeyPassphrase"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if _, err := sshx.ParsePrivateKeyAuth(body.PrivateKey, body.PrivateKeyPassphrase); err != nil {
+		code, message := sshx.ClassifyError(err)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "code": code, "error": message})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) rememberPrivateKeyPassphrase(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if err := s.servers.RememberPrivateKeyPassphrase(r.Context(), r.PathValue("id"), body.Passphrase); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // testServerDraft checks unsaved connection details; serverId is set when editing.
 func (s *Server) testServerDraft(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -237,10 +276,26 @@ func (s *Server) testServerDraft(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) connectServer(w http.ResponseWriter, r *http.Request) {
-	item, err := s.servers.Connect(r.Context(), r.PathValue("id"))
+	var body struct {
+		PrivateKeyPassphrase string `json:"privateKeyPassphrase"`
+		RememberPassphrase   bool   `json:"rememberPassphrase"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+			return
+		}
+	}
+	item, err := s.servers.ConnectWithPassphrase(r.Context(), r.PathValue("id"), body.PrivateKeyPassphrase, body.RememberPassphrase)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{
-			"error":  sshx.PublicError(err),
+		code, message := sshx.ClassifyError(err)
+		status := http.StatusBadGateway
+		if code == sshx.CodePassphraseRequired || code == sshx.CodePassphraseInvalid {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, map[string]any{
+			"error":  message,
+			"code":   code,
 			"server": item,
 		})
 		return
@@ -1028,6 +1083,20 @@ func writeError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, servers.ErrNotFound) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "server not found"})
+		return
+	}
+	if errors.Is(err, sshx.ErrPassphraseRequired) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "This private key is encrypted. Enter its passphrase to continue.",
+			"code":  sshx.CodePassphraseRequired,
+		})
+		return
+	}
+	if errors.Is(err, sshx.ErrInvalidPassphrase) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "The private key passphrase is incorrect. Check it and try again.",
+			"code":  sshx.CodePassphraseInvalid,
+		})
 		return
 	}
 	if errors.Is(err, filesystem.ErrExists) {

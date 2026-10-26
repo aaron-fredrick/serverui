@@ -1,16 +1,22 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AddServerModal } from "@/src/components/server-selection/AddServerModal";
 import { ApiError } from "@/src/lib/api/client";
-import { testServerDraft } from "@/src/lib/api/server";
+import { testServerDraft, validatePrivateKey } from "@/src/lib/api/server";
 import type { Server } from "@/src/lib/servers";
 
-vi.mock("@/src/lib/api/server", () => ({ testServerDraft: vi.fn() }));
+vi.mock("@/src/lib/api/server", () => ({
+  testServerDraft: vi.fn(),
+  validatePrivateKey: vi.fn(),
+  rememberServerPrivateKeyPassphrase: vi.fn(),
+}));
 const testDraft = vi.mocked(testServerDraft);
+const validateKey = vi.mocked(validatePrivateKey);
 
 beforeEach(() => {
   testDraft.mockReset();
+  validateKey.mockReset();
 });
 
 describe("AddServerModal", () => {
@@ -97,9 +103,58 @@ describe("AddServerModal", () => {
 
     expect(screen.getByPlaceholderText(/BEGIN OPENSSH PRIVATE KEY/)).toBeInTheDocument();
     expect(
-      screen.getByText(/Your private key is encrypted before being stored/),
+      screen.getByText(/A passphrase is requested only when the pasted key requires one/),
     ).toBeInTheDocument();
   });
+
+  it(
+    "prompts only after the backend detects an encrypted private key and retries with its passphrase",
+    async () => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn().mockResolvedValue(undefined);
+      validateKey
+        .mockResolvedValueOnce({
+          ok: false,
+          code: "passphrase_required",
+          error: "This private key is encrypted. Enter its passphrase to continue.",
+        })
+        .mockResolvedValueOnce({ ok: true });
+
+      render(<AddServerModal onClose={() => undefined} onSubmit={onSubmit} />);
+      await user.type(screen.getByLabelText("Server Name"), "Encrypted Key");
+      await user.type(screen.getByLabelText("Host / IP"), "203.0.113.10");
+      await user.type(screen.getByLabelText("Username"), "deploy");
+      await user.click(screen.getByRole("button", { name: "SSH Private Key" }));
+      fireEvent.change(screen.getByLabelText("Private Key"), {
+        target: {
+          value: "-----BEGIN OPENSSH PRIVATE KEY-----\\nabc\\n-----END OPENSSH PRIVATE KEY-----",
+        },
+      });
+
+      expect(screen.queryByLabelText("Private key passphrase")).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Save Server" }));
+      expect(await screen.findByLabelText("Private key passphrase")).toBeInTheDocument();
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      await user.type(screen.getByLabelText("Private key passphrase"), "correct horse");
+      await user.click(
+        screen.getByRole("checkbox", { name: /Remember passphrase for this server/ }),
+      );
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      expect(validateKey).toHaveBeenLastCalledWith({
+        privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\\nabc\\n-----END OPENSSH PRIVATE KEY-----",
+        privateKeyPassphrase: "correct horse",
+      });
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\\nabc\\n-----END OPENSSH PRIVATE KEY-----",
+          privateKeyPassphrase: "correct horse",
+          rememberPrivateKeyPassphrase: true,
+        }),
+        { connect: false },
+      );
+    },
+  );
 
   it("disables autocapitalization, autocorrect, and spellcheck on host and username inputs", () => {
     render(<AddServerModal onClose={() => undefined} onSubmit={() => undefined} />);

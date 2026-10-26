@@ -274,6 +274,123 @@ func (s *Service) Connect(ctx context.Context, id string) (Public, error) {
 	return s.public(rec), nil
 }
 
+// ConnectWithPassphrase retries a saved private-key connection using a one-time
+// passphrase. The passphrase is persisted only when remember is explicitly true.
+func (s *Service) ConnectWithPassphrase(ctx context.Context, id, passphrase string, remember bool) (Public, error) {
+	if strings.TrimSpace(passphrase) == "" {
+		return s.Connect(ctx, id)
+	}
+	rec, err := s.store.Get(ctx, id)
+	if err != nil {
+		return Public{}, err
+	}
+	if rec.AuthType != AuthPrivateKey {
+		return Public{}, fmt.Errorf("server does not use private-key authentication")
+	}
+	cred, err := s.store.GetCredential(ctx, rec.ID)
+	if err != nil {
+		return Public{}, fmt.Errorf("unable to authenticate")
+	}
+	secret, err := s.box.Decrypt(cred.EncryptedSecret)
+	if err != nil {
+		return Public{}, fmt.Errorf("unable to authenticate")
+	}
+	key, _, err := decodePrivateKeyCredential(secret)
+	if err != nil {
+		return Public{}, err
+	}
+	auth, err := sshx.ParsePrivateKeyAuth(key, passphrase)
+	if err != nil {
+		return Public{}, err
+	}
+	if remember {
+		packed, err := encodePrivateKeyCredential(key, passphrase)
+		if err != nil {
+			return Public{}, err
+		}
+		encrypted, err := s.box.Encrypt(packed)
+		if err != nil {
+			return Public{}, fmt.Errorf("unable to store credentials")
+		}
+		cred.EncryptedSecret = encrypted
+		cred.UpdatedAt = time.Now().UTC()
+		if err := s.store.UpsertCredential(ctx, cred); err != nil {
+			return Public{}, err
+		}
+		s.pool.Forget(rec.ID)
+		return s.Connect(ctx, id)
+	}
+
+	cfg := sshx.Config{Host: rec.Host, Port: rec.Port, Username: rec.Username}
+	s.pool.Forget(rec.ID)
+	rec.Status = StatusConnecting
+	rec.LastError = ""
+	rec.UpdatedAt = time.Now().UTC()
+	_ = s.store.Update(ctx, rec)
+	_, err = s.pool.EnsureWithAuth(rec.ID, cfg, auth)
+	if err != nil {
+		rec.Status = statusFromErr(err)
+		rec.LastError = sshx.PublicError(err)
+		rec.UpdatedAt = time.Now().UTC()
+		_ = s.store.Update(ctx, rec)
+		return s.public(rec), err
+	}
+	now := time.Now().UTC()
+	rec.Status = StatusOnline
+	rec.LastError = ""
+	rec.LastSeen = &now
+	rec.UpdatedAt = now
+	_ = s.store.Update(ctx, rec)
+	return s.public(rec), nil
+}
+
+// RememberPrivateKeyPassphrase validates and stores a passphrase inside the
+// existing encrypted credential payload. It does not open or close a session.
+func (s *Service) RememberPrivateKeyPassphrase(ctx context.Context, id, passphrase string) error {
+	if strings.TrimSpace(passphrase) == "" {
+		return sshx.ErrPassphraseRequired
+	}
+	rec, err := s.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if rec.AuthType != AuthPrivateKey {
+		return fmt.Errorf("server does not use private-key authentication")
+	}
+	cred, err := s.store.GetCredential(ctx, rec.ID)
+	if err != nil {
+		return fmt.Errorf("unable to authenticate")
+	}
+	secret, err := s.box.Decrypt(cred.EncryptedSecret)
+	if err != nil {
+		return fmt.Errorf("unable to authenticate")
+	}
+	key, _, err := decodePrivateKeyCredential(secret)
+	if err != nil {
+		return err
+	}
+	if _, err := sshx.ParsePrivateKeyAuth(key, passphrase); err != nil {
+		return err
+	}
+	packed, err := encodePrivateKeyCredential(key, passphrase)
+	if err != nil {
+		return err
+	}
+	encrypted, err := s.box.Encrypt(packed)
+	if err != nil {
+		return fmt.Errorf("unable to store credentials")
+	}
+	cred.EncryptedSecret = encrypted
+	cred.UpdatedAt = time.Now().UTC()
+	if err := s.store.UpsertCredential(ctx, cred); err != nil {
+		return err
+	}
+	if !s.pool.IsConnected(rec.ID) {
+		s.pool.Forget(rec.ID)
+	}
+	return nil
+}
+
 func (s *Service) Disconnect(ctx context.Context, id string) (Public, error) {
 	rec, err := s.store.Get(ctx, id)
 	if err != nil {
@@ -373,8 +490,11 @@ func (s *Service) secret(input Input, required bool) (string, error) {
 		if required && input.PrivateKey == "" {
 			return "", fmt.Errorf("private key is required")
 		}
-		if _, err := sshx.ParsePrivateKeyAuth(input.PrivateKey, ""); err != nil {
+		if _, err := sshx.ParsePrivateKeyAuth(input.PrivateKey, input.PrivateKeyPassphrase); err != nil {
 			return "", err
+		}
+		if input.PrivateKeyPassphrase != "" && input.RememberPrivateKeyPassphrase {
+			return encodePrivateKeyCredential(input.PrivateKey, input.PrivateKeyPassphrase)
 		}
 		return input.PrivateKey, nil
 	default:
@@ -427,11 +547,22 @@ func (s *Service) public(rec Record) Public {
 }
 
 func authMethod(authType, secret string) (sshx.AuthMethod, error) {
+	if authType == AuthPrivateKey {
+		key, passphrase, err := decodePrivateKeyCredential(secret)
+		if err != nil {
+			return nil, err
+		}
+		return sshx.ParsePrivateKeyAuth(key, passphrase)
+	}
+	return authMethodWithPassphrase(authType, secret, "")
+}
+
+func authMethodWithPassphrase(authType, secret, passphrase string) (sshx.AuthMethod, error) {
 	switch authType {
 	case AuthPassword:
 		return sshx.PasswordAuth{Password: secret}, nil
 	case AuthPrivateKey:
-		return sshx.ParsePrivateKeyAuth(secret, "")
+		return sshx.ParsePrivateKeyAuth(secret, passphrase)
 	default:
 		return nil, fmt.Errorf("invalid authentication type")
 	}

@@ -20,6 +20,7 @@ vi.mock("@/src/lib/api/server", () => ({
   testServerConnection: vi.fn(),
 }));
 
+import { ApiError } from "@/src/lib/api/client";
 import { SessionProvider, useSession } from "@/src/lib/session";
 
 const inventory = [
@@ -113,6 +114,63 @@ describe("session connection isolation", () => {
     expect(screen.getByText("b:live:online")).toBeInTheDocument();
     expect(disconnectServer).not.toHaveBeenCalled();
   });
+
+  it(
+    "prompts for an encrypted SSH key and retries without losing the server selection",
+    async () => {
+      const user = userEvent.setup();
+      listServers.mockResolvedValue([
+        { ...inventory[0], authType: "private_key" },
+        inventory[1],
+      ]);
+      connectServer
+        .mockRejectedValueOnce(
+          new ApiError(
+            "This private key is encrypted. Enter its passphrase to continue.",
+            400,
+            "passphrase_required",
+          ),
+        )
+        .mockResolvedValueOnce({
+          id: "a",
+          name: "Production",
+          host: "203.0.113.10",
+          status: "online",
+          connected: true,
+          username: "deploy",
+        });
+
+      render(
+        <SessionProvider>
+          <Probe />
+        </SessionProvider>,
+      );
+
+      await user.click(await screen.findByRole("button", { name: "Connect A" }));
+      expect(
+        await screen.findByRole("dialog", { name: "Unlock private key" }),
+      ).toBeInTheDocument();
+      await user.type(screen.getByLabelText("Private key passphrase"), "correct horse");
+      await user.click(
+        screen.getByRole("checkbox", { name: /Remember passphrase for this server/ }),
+      );
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+
+      await waitFor(() => {
+        expect(connectServer).toHaveBeenNthCalledWith(2, "a", {
+          privateKeyPassphrase: "correct horse",
+          rememberPassphrase: true,
+        });
+      });
+      await waitFor(() => {
+        expect(screen.getByText("a:live:online")).toBeInTheDocument();
+      });
+      expect(
+        screen.queryByRole("dialog", { name: "Unlock private key" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText("b:live:online")).toBeInTheDocument();
+    },
+  );
 
   it("does not ask for metrics until a server is connected", async () => {
     listServers.mockResolvedValue([

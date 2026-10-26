@@ -18,7 +18,8 @@ func TestClassifyError(t *testing.T) {
 		"ssh: handshake failed: ssh: unable to authenticate, attempted methods [none password], no supported methods remain": CodeAuthFailed,
 		"ssh: handshake failed: read tcp 1.2.3.4:5->6.7.8.9:22: i/o timeout":                                                 CodeTimeout,
 		"invalid private key": CodeInvalidPrivateKey,
-		"passphrase-protected private keys are not supported yet": CodePassphraseRequired,
+		"passphrase required": CodePassphraseRequired,
+		"invalid passphrase": CodePassphraseInvalid,
 		"something unexpected": CodeSSHFailed,
 	}
 	for raw, want := range cases {

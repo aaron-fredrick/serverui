@@ -13,6 +13,7 @@ const (
 	CodeAuthFailed         = "auth_failed"
 	CodeInvalidPrivateKey  = "invalid_private_key"
 	CodePassphraseRequired = "passphrase_required"
+	CodePassphraseInvalid  = "passphrase_invalid"
 	CodeSSHFailed          = "ssh_failed"
 )
 
@@ -24,8 +25,10 @@ func ClassifyError(err error) (code, message string) {
 	msg := strings.ToLower(err.Error())
 	switch {
 	// Auth failures also contain "handshake failed", so match them first.
-	case strings.Contains(msg, "passphrase"):
-		return CodePassphraseRequired, "This private key is protected by a passphrase. Passphrase-protected keys are not supported yet."
+	case strings.Contains(msg, "invalid passphrase"):
+		return CodePassphraseInvalid, "The private key passphrase is incorrect. Check it and try again."
+	case strings.Contains(msg, "passphrase required"):
+		return CodePassphraseRequired, "This private key is encrypted. Enter its passphrase to continue."
 	case strings.Contains(msg, "invalid private key"),
 		strings.Contains(msg, "no key found"),
 		strings.Contains(msg, "private key is required"):
@@ -66,7 +69,9 @@ func PublicError(err error) string {
 	}
 	switch code, _ := ClassifyError(err); code {
 	case CodePassphraseRequired:
-		return "passphrase-protected private keys are not supported yet"
+		return "private key passphrase required"
+	case CodePassphraseInvalid:
+		return "invalid private key passphrase"
 	case CodeInvalidPrivateKey:
 		return "invalid private key"
 	case CodeAuthFailed:

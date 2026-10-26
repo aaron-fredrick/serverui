@@ -8,6 +8,11 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+var (
+	ErrPassphraseRequired = errors.New("passphrase required")
+	ErrInvalidPassphrase  = errors.New("invalid passphrase")
+)
+
 type AuthMethod interface {
 	SSHAuthMethod() ssh.AuthMethod
 }
@@ -40,12 +45,12 @@ func ParsePrivateKeyAuth(pemBytes, passphrase string) (AuthMethod, error) {
 	}
 	var missing *ssh.PassphraseMissingError
 	if errors.As(err, &missing) || strings.Contains(strings.ToLower(err.Error()), "passphrase") {
-		if strings.TrimSpace(passphrase) == "" {
-			return nil, fmt.Errorf("passphrase-protected private keys are not supported yet")
+		if passphrase == "" {
+			return nil, ErrPassphraseRequired
 		}
 		signer, err = ssh.ParsePrivateKeyWithPassphrase(raw, []byte(passphrase))
 		if err != nil {
-			return nil, fmt.Errorf("invalid private key")
+			return nil, ErrInvalidPassphrase
 		}
 		return PublicKeyAuth{signer: signer}, nil
 	}

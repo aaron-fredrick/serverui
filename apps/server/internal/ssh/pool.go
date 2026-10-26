@@ -33,6 +33,25 @@ func (p *Pool) Ensure(id string) (*ssh.Client, error) {
 	return mgr.Ensure()
 }
 
+// EnsureWithAuth opens a pooled session with an explicit in-memory auth method.
+// It is used for one-time credentials that must not be persisted.
+func (p *Pool) EnsureWithAuth(id string, cfg Config, auth AuthMethod) (*ssh.Client, error) {
+	if id == "" {
+		return nil, fmt.Errorf("server id is required")
+	}
+	p.mu.Lock()
+	old := p.sessions[id]
+	delete(p.sessions, id)
+	mgr := NewManager(cfg, auth)
+	mgr.id = id
+	p.sessions[id] = mgr
+	p.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	return mgr.Ensure()
+}
+
 func (p *Pool) Run(id, command string) ([]byte, error) {
 	mgr, err := p.Manager(id)
 	if err != nil {
